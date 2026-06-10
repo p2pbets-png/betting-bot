@@ -2201,10 +2201,17 @@ async def activegiveaways(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+    chat_id = msg.chat.id
+    members = [m.full_name for m in (msg.new_chat_members or [])]
+    print(f"[JOIN] chat={chat_id} new_members={members}")
     try:
-        await update.message.delete()
-    except Exception:
-        pass
+        await msg.delete()
+        print(f"[JOIN] Deleted join message in chat={chat_id}")
+    except Exception as e:
+        print(f"[JOIN] Failed to delete in chat={chat_id}: {e}")
 
 
 def main():

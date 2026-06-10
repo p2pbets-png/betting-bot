@@ -807,15 +807,20 @@ async def admin_topic_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message
     if not msg:
         return
-    print(f"[GUARD] chat_id={msg.chat.id} thread_id={msg.message_thread_id} sender={msg.from_user.id if msg.from_user else None} | expecting group={ADMIN_GROUP_ID} topic={ADMIN_TOPIC_ID}")
     if msg.chat.id != ADMIN_GROUP_ID or msg.message_thread_id != ADMIN_TOPIC_ID:
         return
     sender_id = msg.from_user.id if msg.from_user else None
     if sender_id == OWNER_ID or sender_id == context.bot.id:
         return
     try:
+        member = await context.bot.get_chat_member(chat_id=ADMIN_GROUP_ID, user_id=sender_id)
+        if member.status in ("administrator", "creator"):
+            return
+    except Exception:
+        pass
+    try:
         await msg.delete()
-        print(f"[GUARD] Deleted message from {sender_id} in topic {ADMIN_TOPIC_ID}")
+        print(f"[GUARD] Deleted message from {sender_id} (non-admin) in topic {ADMIN_TOPIC_ID}")
     except Exception as e:
         print(f"[GUARD] Failed to delete: {e}")
 
@@ -865,6 +870,16 @@ async def testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(results))
 
 
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    await update.message.reply_text(
+        f"🪪 Your Telegram ID: `{user.id}`\n"
+        f"🔑 Bot's OWNER\\_ID: `{OWNER_ID}`\n"
+        f"✅ Match: `{user.id == OWNER_ID}`",
+        parse_mode="Markdown",
+    )
+
+
 async def pendingbets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     if user.id != OWNER_ID:
@@ -907,12 +922,13 @@ async def forceresolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ This command is restricted to the bot owner.")
         return
 
-    if len(context.args) != 2 or context.args[1] not in ("poster", "taker"):
+    if len(context.args) != 2 or context.args[1] not in ("poster", "taker", "cancel"):
         await update.message.reply_text(
-            "📋 *Usage:* `/forceresolve <bet_id> <poster|taker>`\n\n"
+            "📋 *Usage:* `/forceresolve <bet_id> <poster|taker|cancel>`\n\n"
             "Examples:\n"
             "`/forceresolve 12 poster` — declares the poster as winner\n"
-            "`/forceresolve 12 taker` — declares the taker as winner\n\n"
+            "`/forceresolve 12 taker` — declares the taker as winner\n"
+            "`/forceresolve 12 cancel` — cancels the bet, no winner\n\n"
             "Only works on bets with status: matched, pending\\_confirm, or disputed.",
             parse_mode="Markdown",
         )
@@ -945,15 +961,38 @@ async def forceresolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    if not bet[6]:
-        await update.message.reply_text(f"Bet #{bet_id} has no taker yet.")
-        conn.close()
-        return
-
     poster_id, poster_name = bet[1], bet[2]
     taker_id, taker_name = bet[6], bet[7]
     amount = bet[3]
     bet_chat_id = bet[12]
+
+    # ── Cancel path ───────────────────────────────────────────────────────────
+    if winner_side == "cancel":
+        c.execute(
+            "UPDATE bets SET status='cancelled', poster_vote=NULL, taker_vote=NULL WHERE id=%s",
+            (bet_id,),
+        )
+        conn.commit()
+        conn.close()
+        cancel_text = (
+            f"🚫 *Bet #{bet_id} Cancelled by Admin* (${amount})\n"
+            f"_{bet[4]}_\n\n"
+            f"The bet has been voided. No winner declared.\n"
+            f"_(Cancelled by bot owner)_"
+        )
+        await update.message.reply_text(cancel_text, parse_mode="Markdown")
+        if taker_id:
+            await notify_user(context, poster_id, poster_name, bet_chat_id, cancel_text)
+            await notify_user(context, taker_id, taker_name, bet_chat_id, cancel_text)
+        else:
+            await notify_user(context, poster_id, poster_name, bet_chat_id, cancel_text)
+        return
+
+    # ── Settle path ───────────────────────────────────────────────────────────
+    if not taker_id:
+        await update.message.reply_text(f"Bet #{bet_id} has no taker yet.")
+        conn.close()
+        return
 
     result_text = do_settle_bet(conn, c, bet, winner_side)
     c.execute("UPDATE bets SET status='settled', poster_vote=NULL, taker_vote=NULL WHERE id=%s", (bet_id,))
@@ -2161,6 +2200,13 @@ async def activegiveaways(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+async def delete_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+
 def main():
     app = Application.builder().token(TOKEN).build()
 
@@ -2187,6 +2233,7 @@ def main():
     app.add_handler(CommandHandler("topicid", topicid))
     app.add_handler(CommandHandler("testpost", testpost))
     app.add_handler(CommandHandler("searchbet", searchbet))
+    app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("pendingbets", pendingbets))
     app.add_handler(CommandHandler("forceresolve", forceresolve))
     app.add_handler(CommandHandler("newgiveaway", newgiveaway))
@@ -2212,6 +2259,10 @@ def main():
         group=2,
     )
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, delete_join_message),
+        group=4,
+    )
 
     print(f"Bot Running (PostgreSQL) | ADMIN_GROUP_ID={ADMIN_GROUP_ID} ADMIN_TOPIC_ID={ADMIN_TOPIC_ID} | ANNOUNCE_GROUP_ID={ANNOUNCE_GROUP_ID} ANNOUNCE_TOPIC_ID={ANNOUNCE_TOPIC_ID}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -807,22 +807,25 @@ async def admin_topic_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message
     if not msg:
         return
+    sender_id = msg.from_user.id if msg.from_user else None
+    print(f"[GUARD] chat={msg.chat.id}(expected {ADMIN_GROUP_ID}) thread={msg.message_thread_id}(expected {ADMIN_TOPIC_ID}) sender={sender_id}")
     if msg.chat.id != ADMIN_GROUP_ID or msg.message_thread_id != ADMIN_TOPIC_ID:
         return
-    sender_id = msg.from_user.id if msg.from_user else None
     if sender_id == OWNER_ID or sender_id == context.bot.id:
+        print(f"[GUARD] Allowed owner/bot {sender_id}")
         return
     try:
         member = await context.bot.get_chat_member(chat_id=ADMIN_GROUP_ID, user_id=sender_id)
+        print(f"[GUARD] sender {sender_id} status={member.status}")
         if member.status in ("administrator", "creator"):
             return
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GUARD] get_chat_member failed: {e}")
     try:
         await msg.delete()
-        print(f"[GUARD] Deleted message from {sender_id} (non-admin) in topic {ADMIN_TOPIC_ID}")
+        print(f"[GUARD] Deleted message from {sender_id}")
     except Exception as e:
-        print(f"[GUARD] Failed to delete: {e}")
+        print(f"[GUARD] Delete failed: {e}")
 
 
 async def topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2271,8 +2274,19 @@ def main():
         group=4,
     )
 
+    async def conflict_error_handler(update, context):
+        from telegram.error import Conflict
+        if isinstance(context.error, Conflict):
+            import asyncio
+            print("[ERROR] Conflict with another bot instance — retrying in 10s...")
+            await asyncio.sleep(10)
+        else:
+            print(f"[ERROR] {type(context.error).__name__}: {context.error}")
+
+    app.add_error_handler(conflict_error_handler)
+
     print(f"Bot Running (PostgreSQL) | ADMIN_GROUP_ID={ADMIN_GROUP_ID} ADMIN_TOPIC_ID={ADMIN_TOPIC_ID} | ANNOUNCE_GROUP_ID={ANNOUNCE_GROUP_ID} ANNOUNCE_TOPIC_ID={ANNOUNCE_TOPIC_ID}")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
